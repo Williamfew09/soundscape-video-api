@@ -7,6 +7,7 @@ import tempfile
 import uuid
 import logging
 import subprocess
+import math
 
 app = Flask(__name__)
 CORS(app)
@@ -51,35 +52,41 @@ def merge_video_audio():
                 f.write(chunk)
         logger.info(f"Audio downloaded: {os.path.getsize(audio_path)} bytes")
         
-        # Get audio duration
-        logger.info("Probing audio duration...")
+        # Get durations
+        logger.info("Probing durations...")
         audio_probe = ffmpeg.probe(audio_path)
         audio_duration = float(audio_probe['format']['duration'])
-        logger.info(f"Audio duration: {audio_duration}s")
         
-        # Get video duration
         video_probe = ffmpeg.probe(video_path)
         video_duration = float(video_probe['format']['duration'])
+        
+        logger.info(f"Audio duration: {audio_duration}s")
         logger.info(f"Video duration: {video_duration}s")
         
-        # Merge using direct FFmpeg command (more reliable than ffmpeg-python for complex operations)
+        # Calculate how many times to loop the video
+        loop_count = math.ceil(audio_duration / video_duration) - 1
+        logger.info(f"Will loop video {loop_count} times")
+        
+        # Merge using direct FFmpeg command
         logger.info("Merging video and audio...")
         
         ffmpeg_cmd = [
             'ffmpeg',
-            '-stream_loop', '-1',  # Loop video
+            '-stream_loop', str(loop_count),
             '-i', video_path,
             '-i', audio_path,
             '-c:v', 'libx264',
             '-c:a', 'aac',
-            '-b:v', '2M',
-            '-b:a', '192k',
-            '-t', str(audio_duration),  # Match audio duration
-            '-preset', 'ultrafast',
+            '-b:v', '1500k',  # Lower bitrate for faster processing
+            '-b:a', '128k',
+            '-shortest',  # Stop when shortest input ends (audio)
+            '-preset', 'veryfast',
             '-movflags', 'faststart',
-            '-y',  # Overwrite output
+            '-y',
             output_path
         ]
+        
+        logger.info(f"FFmpeg command: {' '.join(ffmpeg_cmd)}")
         
         result = subprocess.run(
             ffmpeg_cmd,
@@ -89,24 +96,25 @@ def merge_video_audio():
         )
         
         if result.returncode != 0:
+            logger.error(f"FFmpeg failed with return code {result.returncode}")
             logger.error(f"FFmpeg stderr: {result.stderr}")
             return jsonify({
-                'error': f'FFmpeg failed: {result.stderr}'
+                'error': 'FFmpeg processing failed',
+                'details': result.stderr
             }), 500
         
-        logger.info(f"Merge complete: {output_path}")
+        logger.info("Merge complete!")
+        logger.info(f"FFmpeg output: {result.stdout}")
         
         # Check output file
         if not os.path.exists(output_path):
-            logger.error("Output file not created")
             return jsonify({'error': 'Output file not created'}), 500
             
         output_size = os.path.getsize(output_path)
         logger.info(f"Output file size: {output_size} bytes")
         
-        if output_size == 0:
-            logger.error("Output file is empty")
-            return jsonify({'error': 'Output file is empty'}), 500
+        if output_size < 1000:
+            return jsonify({'error': 'Output file too small'}), 500
         
         # Return the merged file
         return send_file(
@@ -118,17 +126,16 @@ def merge_video_audio():
     
     except subprocess.TimeoutExpired:
         logger.error("FFmpeg timeout")
-        return jsonify({'error': 'Processing timeout - video too large'}), 500
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Download error: {str(e)}")
-        return jsonify({'error': f'Download error: {str(e)}'}), 500
+        return jsonify({'error': 'Processing timeout'}), 500
     except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}")
-        return jsonify({'error': f'Unexpected error: {str(e)}'}), 500
+        logger.error(f"Error: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'ok', 'service': 'video-merger', 'version': 'v4.0'})
+    return jsonify({'status': 'ok', 'service': 'video-merger', 'version': 'v5.0'})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
